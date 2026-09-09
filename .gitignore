@@ -1,0 +1,5 @@
+# 用户个人导出数据（不入库）
+douban-data/
+
+# macOS
+.DS_Store

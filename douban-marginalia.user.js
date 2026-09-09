@@ -1,12 +1,12 @@
 // ==UserScript==
-// @name         豆瓣书影音游戏数据导出工具
-// @name:en      Douban Media Export Tool
-// @name:zh-CN   豆瓣书影音游戏数据导出工具
-// @namespace    https://github.com/byJming/douban-movie-exporter
-// @version      2.4.0
-// @description  导出豆瓣电影、读书、音乐和游戏收藏，支持 Excel/JSON、封面资源 ZIP，并在豆瓣页面提供汇总导航。
-// @description:en Export Douban movies, books, music and games to Excel/JSON with cover ZIP support and a compact summary navigator.
-// @author       ming
+// @name         Douban Marginalia
+// @name:en      Douban Marginalia
+// @name:zh-CN   Douban Marginalia
+// @namespace    https://local.codex/douban-marginalia
+// @version      1.0.4
+// @description  按需导出豆瓣电影、读书、音乐和游戏收藏，支持 JSON/Excel/CSV、IMDb、ISBN 和封面资源 ZIP。
+// @description:en Export selected Douban movie, book, music and game fields to JSON/Excel/CSV, with optional IMDb, ISBN and cover assets.
+// @author       ming (original project); Sean Li (local modifications)
 // @match        https://*.douban.com/*
 // @match        https://douban.com/*
 // @match        https://www.douban.com/people/*
@@ -38,19 +38,21 @@
 // @connect      img8.doubanio.com
 // @connect      img9.doubanio.com
 // @license      MIT
-// @homepage     https://github.com/byJming/douban-movie-exporter
-// @supportURL   https://github.com/byJming/douban-movie-exporter/issues
+// @homepageURL  https://github.com/byJming/douban-movie-exporter
+// @source       https://github.com/byJming/douban-movie-exporter
 // ==/UserScript==
 
 (function () {
     'use strict';
 
     const CONFIG = {
-        minDelay: 1200,
-        maxDelay: 3000,
+        minDelay: 2000,
+        maxDelay: 2800,
         stateKey: 'db_export_state_v2',
         dataKey: 'db_export_data_v2',
         fieldsKey: 'db_export_fields_v2',
+        detailCacheKey: 'db_export_detail_cache_v1',
+        detailDelay: 2000,
         coverConcurrency: 2
     };
 
@@ -69,7 +71,7 @@
     };
     const STATUS_ORDER = ['wish', 'do', 'collect'];
 
-    const FIELDS = [
+    const COMMON_FIELDS = [
         { key: 'title', name: '标题', default: true },
         { key: 'id', name: '豆瓣条目 ID', default: false },
         { key: 'rating', name: '个人评分', default: true },
@@ -81,6 +83,14 @@
         { key: 'link', name: '豆瓣链接', default: true }
     ];
 
+    const CATEGORY_FIELDS = {
+        movie: [{ key: 'imdb_id', name: 'IMDb', default: false, requiresDetail: true }],
+        book: [{ key: 'isbn', name: 'ISBN', default: false, requiresDetail: true }],
+        music: [],
+        game: []
+    };
+
+
     const styleText = `
         #db-export-summary-btn {
             position: fixed; top: 110px; right: 20px; z-index: 9999;
@@ -89,6 +99,18 @@
             box-shadow: 0 4px 12px rgba(62,175,124,.35); transition: .2s;
         }
         #db-export-summary-btn:hover { background: #339268; transform: translateY(-1px); }
+        #db-export-task-controls {
+            position: fixed; top: 160px; right: 20px; z-index: 9999; width: 210px;
+            padding: 12px; border: 1px solid #e6ebe8; border-radius: 10px; background: #fff;
+            box-shadow: 0 8px 22px rgba(0,0,0,.16); font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+        }
+        .db-task-title { color:#333; font-size:13px; font-weight:700; }
+        .db-task-meta { margin-top:4px; color:#777; font-size:12px; }
+        .db-task-actions { display:flex; flex-wrap:wrap; gap:7px; margin-top:10px; }
+        .db-task-actions button { flex:1 1 88px; padding:7px 6px; border:0; border-radius:5px; cursor:pointer; font-size:12px; font-weight:700; }
+        #db-task-stop { background:#fce8e6; color:#b42318; }
+        #db-task-export { background:#fff4ce; color:#765500; }
+        #db-task-restart { background:#e8f4ee; color:#177245; }
         #db-export-summary-overlay, #db-export-modal-overlay {
             position: fixed; inset: 0; z-index: 10000; background: rgba(0,0,0,.52);
             display: flex; align-items: center; justify-content: center;
@@ -196,10 +218,122 @@
         localStorage.setItem(storageKey(CONFIG.dataKey), JSON.stringify(data));
     }
 
-    function getSelectedFields() {
-        const allowed = new Set(FIELDS.map(field => field.key));
-        return parseJson(localStorage.getItem(storageKey(CONFIG.fieldsKey)), FIELDS.filter(f => f.default).map(f => f.key))
+    function getAvailableFields(category) {
+        return [...COMMON_FIELDS, ...(CATEGORY_FIELDS[category] || [])];
+    }
+
+    function getSelectedFields(category = detectContext()) {
+        const availableFields = getAvailableFields(category);
+        const allowed = new Set(availableFields.map(field => field.key));
+        return parseJson(localStorage.getItem(storageKey(CONFIG.fieldsKey)), availableFields.filter(f => f.default).map(f => f.key))
             .filter(field => allowed.has(field));
+    }
+
+    function getDetailCache() {
+        return parseJson(localStorage.getItem(storageKey(CONFIG.detailCacheKey)), {});
+    }
+
+    function setDetailCache(category, id, detail) {
+        const cache = getDetailCache();
+        cache[`${category}:${id}`] = detail;
+        localStorage.setItem(storageKey(CONFIG.detailCacheKey), JSON.stringify(cache));
+    }
+
+    function cleanComment(value) {
+        return String(value || '').replace(/\s*[（(]\s*\d+\s*有用\s*[）)]\s*$/, '').trim();
+    }
+
+    function captchaError(url) {
+        const error = new Error('豆瓣要求完成安全验证');
+        error.code = 'DOUBAN_CAPTCHA_REQUIRED';
+        error.captchaUrl = url;
+        return error;
+    }
+
+    function isVerificationResponse(response, html) {
+        const url = String(response.url || '');
+        return response.status === 403 || response.status === 429
+            || /sec\.douban\.com|captcha|安全验证|滑动验证/i.test(url)
+            || /sec\.douban\.com|请完成验证|滑动验证|安全验证/i.test(String(html || '').slice(0, 12000));
+    }
+
+    function infoValueFromDoc(doc, label) {
+        const labels = [...doc.querySelectorAll('#info .pl')];
+        const marker = labels.find(el => textOf(el).replace(/[:：]\s*$/, '') === label);
+        if (!marker) return '';
+        const parts = [];
+        let node = marker.nextSibling;
+        while (node && !(node.nodeType === 1 && node.matches('.pl'))) {
+            const value = node.nodeType === 3 ? node.textContent.trim() : textOf(node);
+            if (value) parts.push(value);
+            node = node.nextSibling;
+        }
+        return parts.join(' ').replace(/\s+/g, ' ').trim();
+    }
+
+    function parseMovieDetail(doc) {
+        const infoText = textOf(doc.querySelector('#info'));
+        const imdb = infoText.match(/IMDb[:：]\s*(tt\d+)/i);
+        return { imdb_id: imdb ? imdb[1] : '' };
+    }
+
+    function parseBookDetail(doc) {
+        const isbn = infoValueFromDoc(doc, 'ISBN');
+        const isbnDigits = isbn.replace(/[^0-9X]/gi, '');
+        return { isbn: isbn || isbnDigits };
+    }
+
+    async function enrichDetails(records, category, fields, onProgress = null) {
+        const needsDetails = fields.some(field => getAvailableFields(category).find(item => item.key === field)?.requiresDetail);
+        if (!needsDetails || !['movie', 'book'].includes(category)) return records;
+        const cache = getDetailCache();
+        let completed = 0;
+        let cached = 0;
+        const reportProgress = currentTitle => {
+            if (!onProgress) return;
+            const remainingFetches = records.slice(completed)
+                .filter(record => !cache[`${category}:${record.id}`]).length;
+            onProgress({
+                currentTitle,
+                completed,
+                total: records.length,
+                cached,
+                estimatedRemainingSeconds: Math.ceil(remainingFetches * CONFIG.detailDelay / 1000)
+            });
+        };
+        reportProgress('准备读取详情…');
+        for (let index = 0; index < records.length; index += 1) {
+            const record = records[index];
+            const cacheKey = `${category}:${record.id}`;
+            let detail = cache[cacheKey];
+            reportProgress(record.title);
+            if (!detail) {
+                try {
+                    const response = await fetch(record.link, { credentials: 'include' });
+                    const html = await response.text();
+                    if (isVerificationResponse(response, html)) throw captchaError(record.link);
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    const doc = new DOMParser().parseFromString(html, 'text/html');
+                    detail = category === 'movie' ? parseMovieDetail(doc) : parseBookDetail(doc);
+                    detail.detail_fetch_status = 'ok';
+                    detail.detail_fetched_at = new Date().toISOString();
+                    setDetailCache(category, record.id, detail);
+                    cache[cacheKey] = detail;
+                } catch (error) {
+                    if (error.code === 'DOUBAN_CAPTCHA_REQUIRED') throw error;
+                    detail = {
+                        detail_fetch_status: 'failed',
+                        detail_fetch_error: String(error && error.message ? error.message : error),
+                        detail_fetched_at: new Date().toISOString()
+                    };
+                }
+                if (index < records.length - 1) await new Promise(resolve => setTimeout(resolve, CONFIG.detailDelay));
+            } else cached += 1;
+            completed += 1;
+            record.detail = detail;
+            reportProgress(record.title);
+        }
+        return records;
     }
 
     function cleanTitle(value) {
@@ -258,6 +392,7 @@
             status: getStatusFromUrl(),
             tags: '',
             comment: '',
+            comment_raw: '',
             intro: '',
             cover_url: getCover(item, category),
             link
@@ -274,7 +409,8 @@
             record.rating = getRating(item);
             record.date = extractDate(textOf(item.querySelector('.date')));
             record.tags = textOf(item.querySelector('.tags')).replace(/^标签[:：]\s*/, '');
-            record.comment = textOf(item.querySelector('.comment'));
+            record.comment_raw = textOf(item.querySelector('.comment'));
+            record.comment = cleanComment(record.comment_raw);
             record.intro = textOf(item.querySelector('.intro'));
             return record;
         });
@@ -287,7 +423,9 @@
             record.title = cleanTitle(textOf(titleLink));
             record.rating = getRating(item);
             record.date = extractDate(textOf(item.querySelector('.date')));
-            record.comment = textOf(item.querySelector('.comment'));
+            record.tags = textOf(item.querySelector('.tags')).replace(/^标签[:：]\s*/, '');
+            record.comment_raw = textOf(item.querySelector('.comment'));
+            record.comment = cleanComment(record.comment_raw);
             record.intro = textOf(item.querySelector('.pub'));
             return record;
         }).filter(record => record.link);
@@ -302,7 +440,8 @@
                 record.title = cleanTitle(textOf(titleLink));
                 record.rating = getRating(item);
                 record.date = extractDate(textOf(item.querySelector('.date')));
-                record.comment = textOf(item.querySelector('.comment'));
+                record.comment_raw = textOf(item.querySelector('.comment'));
+                record.comment = cleanComment(record.comment_raw);
                 record.intro = textOf(item.querySelector('.intro'));
                 return record;
             }).filter(record => record.link);
@@ -323,7 +462,8 @@
             }
             const comment = [...item.querySelectorAll('.content > div')]
                 .find(el => !el.classList.contains('title') && !el.classList.contains('desc') && !el.classList.contains('user-operation'));
-            record.comment = textOf(comment);
+            record.comment_raw = textOf(comment);
+            record.comment = cleanComment(record.comment_raw);
             return record;
         }).filter(record => record.link);
     }
@@ -334,8 +474,9 @@
             const listUrl = new URL(location.href);
             listUrl.searchParams.set('mode', 'list');
             const response = await fetch(listUrl.href, { credentials: 'include' });
-            if (!response.ok) return records;
             const html = await response.text();
+            if (isVerificationResponse(response, html)) throw captchaError(listUrl.href);
+            if (!response.ok) return records;
             const doc = new DOMParser().parseFromString(html, 'text/html');
             const detailMap = new Map();
             [...doc.querySelectorAll('.list-view .item')].forEach(item => {
@@ -343,23 +484,26 @@
                 if (!link) return;
                 detailMap.set(getId(link.href), {
                     tags: textOf(item.querySelector('.tags')).replace(/^标签[:：]\s*/, ''),
-                    comment: textOf(item.querySelector('.comment'))
+                    comment_raw: textOf(item.querySelector('.comment')),
+                    comment: cleanComment(textOf(item.querySelector('.comment')))
                 });
             });
             records.forEach(record => Object.assign(record, detailMap.get(record.id) || {}));
         } catch (e) {
+            if (e.code === 'DOUBAN_CAPTCHA_REQUIRED') throw e;
             console.warn('[Douban Export] 无法补充电影列表字段:', e);
         }
         return records;
     }
 
-    async function scrapeCurrentPage(category, fields) {
+    async function scrapeCurrentPage(category, fields, onDetailProgress) {
         let records;
         if (category === 'movie') records = parseMoviePage();
         else if (category === 'book') records = parseBookPage();
         else if (category === 'music') records = parseMusicPage();
         else records = parseGamePage();
         if (category === 'movie') records = await enrichMovieFromList(records, fields);
+        records = await enrichDetails(records, category, fields, onDetailProgress);
         return records;
     }
 
@@ -555,6 +699,54 @@
         button.title = '汇总并导航到具体分类导出';
         button.onclick = () => showSummaryPanel(context);
         document.body.appendChild(button);
+    }
+
+    function clearActiveExport() {
+        localStorage.removeItem(storageKey(CONFIG.dataKey));
+        setState({ status: 'idle' });
+    }
+
+    function getRestartUrl(category) {
+        const target = new URL(getPageStartUrl(category, 1));
+        target.searchParams.set('db_export', '1');
+        return target.href;
+    }
+
+    function renderTaskControls(category) {
+        const state = getState();
+        if (state.status !== 'running' || state.category !== category) return;
+        const progress = state.detailProgress;
+        const progressText = progress
+            ? `第 ${progress.pageNumber}/${progress.pageTotal} 页 · 详情 ${progress.completed}/${progress.total}${progress.cached ? `（缓存 ${progress.cached}）` : ''} · 约 ${progress.estimatedRemainingSeconds} 秒${progress.currentTitle ? ` · ${progress.currentTitle.slice(0, 20)}` : ''}`
+            : '正在读取列表页…';
+        const existing = document.getElementById('db-export-task-controls');
+        if (existing) {
+            existing.querySelector('.db-task-meta').textContent = `已暂存 ${getStoredData().length} 条；${progressText}`;
+            return;
+        }
+        const control = document.createElement('aside');
+        control.id = 'db-export-task-controls';
+        control.innerHTML = `<div class="db-task-title">⏳ 正在导出${CATEGORIES[category].label}</div>
+            <div class="db-task-meta">已暂存 ${getStoredData().length} 条；${progressText}</div>
+            <div class="db-task-actions"><button id="db-task-export" type="button">停止并导出</button><button id="db-task-stop" type="button">终止并清理</button><button id="db-task-restart" type="button">重新开始</button></div>`;
+        document.body.appendChild(control);
+        control.querySelector('#db-task-export').onclick = () => {
+            if (!window.confirm('停止后将导出目前已经完成的部分；当前正在读取的条目不会写入。')) return;
+            const current = getState();
+            setState({ ...current, status: 'paused_for_download', stoppedEarly: true, stoppedAt: new Date().toISOString() });
+            control.remove();
+            showDownloadPanel(category);
+        };
+        control.querySelector('#db-task-stop').onclick = () => {
+            if (!window.confirm('终止本次导出并清除已暂存的数据？此操作不会影响豆瓣收藏。')) return;
+            clearActiveExport();
+            location.reload();
+        };
+        control.querySelector('#db-task-restart').onclick = () => {
+            if (!window.confirm('重新开始会清除本次已暂存的数据，并回到字段选择。')) return;
+            clearActiveExport();
+            location.href = getRestartUrl(category);
+        };
     }
 
     function getCoverAssetPath(item, index) {
@@ -772,7 +964,7 @@
         };
         await Promise.all(Array.from({ length: Math.min(CONFIG.coverConcurrency, records.length) }, worker));
         const failures = manifest.filter(item => !item.downloaded);
-        if (statusEl) statusEl.textContent = `封面下载完成：成功 ${records.length - failures.length}，失败 ${failures.length}；正在准备资源包中的 JSON 和 Excel…`;
+        if (statusEl) statusEl.textContent = `封面下载完成：成功 ${records.length - failures.length}，失败 ${failures.length}；正在准备资源包中的 JSON、Excel 和 CSV…`;
         const packageEntries = buildDataPackageEntries(category);
         fileEntries.push(...packageEntries);
         const exportState = getState();
@@ -816,7 +1008,14 @@
         if (document.getElementById('db-export-modal-overlay')) return;
         const category = detectContext();
         if (!CATEGORIES[category]) return;
-        const selected = getSelectedFields();
+        const selected = getSelectedFields(category);
+        const availableFields = getAvailableFields(category);
+        const detailFieldHint = category === 'movie'
+            ? '勾选 IMDb 时才会逐条读取电影详情页。'
+            : category === 'book'
+                ? '勾选 ISBN 时才会逐条读取图书详情页。'
+                : '当前分类的字段均来自列表页。';
+        const cachedDetailCount = Object.keys(getDetailCache()).filter(key => key.startsWith(`${category}:`)).length;
         // 封面下载会额外占用网络、内存和磁盘，因此每次新任务都要求用户主动选择。
         const includeCovers = false;
         const totalPages = getTotalPageCount();
@@ -824,18 +1023,25 @@
         overlay.id = 'db-export-modal-overlay';
         overlay.innerHTML = `<div id="db-export-modal">
             <h3>${CATEGORIES[category].icon} 导出${CATEGORIES[category].label}（${getCategoryStatusLabel(category)}）</h3>
-            <p class="db-note">选择数据字段；封面资源单独打包，JSON/Excel 只记录本地文件路径，不保存豆瓣图片原始地址。</p>
-            <div class="db-checkbox-group">${FIELDS.map(field => `<label class="db-checkbox-label"><input class="db-field-checkbox" type="checkbox" value="${field.key}" ${selected.includes(field.key) ? 'checked' : ''}>${field.name}</label>`).join('')}</div>
+            <p class="db-note">选择需要的字段。不勾选详情字段时只读取列表页，速度更快；${detailFieldHint} JSON、Excel 和 CSV 都是原始导出，不包含任何目标平台转换。</p>
+            <div class="db-checkbox-group" id="db-custom-fields">${availableFields.map(field => `<label class="db-checkbox-label"><input class="db-field-checkbox" type="checkbox" value="${field.key}" ${selected.includes(field.key) ? 'checked' : ''}>${field.name}${field.requiresDetail ? '（读取详情页）' : ''}</label>`).join('')}</div>
             <label class="db-checkbox-label" style="padding:10px;border:1px solid #e8e8e8;border-radius:7px"><input id="db-include-covers" type="checkbox" ${includeCovers ? 'checked' : ''}><span><b>同时导出海报/封面资源</b><br><small style="color:#888">完成后下载独立 ZIP；会增加网络流量、浏览器内存与磁盘占用</small></span></label>
             <label class="db-checkbox-label" style="margin-top:12px"><input id="db-limit-pages" type="checkbox"><span><b>仅导出指定页码范围</b><br><small style="color:#888">默认不勾选，将从第 1 页导出到最后一页</small></span></label>
             <div class="db-page-range" id="db-page-range" hidden><label>从第 <input id="db-start-page" type="number" min="1" max="${totalPages}" value="1"> 页</label><span>至</span><label>第 <input id="db-end-page" type="number" min="1" max="${totalPages}" value="${totalPages}"> 页</label></div>
             <p class="db-note">当前共识别到 ${totalPages} 页，每页最多 ${CATEGORIES[category].pageSize} 条。无论从哪一页打开导出，未限制范围时都会先返回第 1 页。</p>
+            <p class="db-note">详情缓存：当前分类已缓存 ${cachedDetailCount} 条。<button class="db-btn db-btn-secondary" id="db-clear-detail-cache" type="button" style="padding:4px 8px;margin-left:6px">清空详情缓存</button></p>
             <div class="db-btn-group"><button class="db-btn db-btn-secondary" id="db-cancel-btn">取消</button><button class="db-btn db-btn-primary" id="db-start-btn">开始抓取</button></div>
         </div>`;
         document.body.appendChild(overlay);
         const rangeToggle = overlay.querySelector('#db-limit-pages');
         const rangeFields = overlay.querySelector('#db-page-range');
         rangeToggle.onchange = () => { rangeFields.hidden = !rangeToggle.checked; };
+        overlay.querySelector('#db-clear-detail-cache').onclick = () => {
+            if (!window.confirm(`清空当前站点已缓存的 ${cachedDetailCount} 条详情？下次勾选 IMDb 或 ISBN 时将重新读取详情页。`)) return;
+            localStorage.removeItem(storageKey(CONFIG.detailCacheKey));
+            overlay.remove();
+            showConfigPanel();
+        };
         overlay.querySelector('#db-cancel-btn').onclick = () => overlay.remove();
         overlay.querySelector('#db-start-btn').onclick = () => {
             const fields = [...overlay.querySelectorAll('.db-field-checkbox:checked')].map(input => input.value);
@@ -857,30 +1063,73 @@
         };
     }
 
+    function makeMissingDetailRows(data, field) {
+        return data.filter(item => !item.detail?.[field]).map(item => ({
+            title: item.title,
+            douban_id: item.id,
+            douban_url: item.link,
+            mark_date: item.date,
+            status: item.status,
+            detail_fetch_status: item.detail?.detail_fetch_status || 'not_fetched',
+            detail_fetch_error: item.detail?.detail_fetch_error || ''
+        }));
+    }
+
+    function getMissingDetailReport(category) {
+        const detailField = category === 'movie' ? 'imdb_id' : category === 'book' ? 'isbn' : '';
+        if (!detailField || !getSelectedFields(category).includes(detailField)) return null;
+        return {
+            field: detailField,
+            label: detailField === 'imdb_id' ? 'IMDb' : 'ISBN',
+            rows: makeMissingDetailRows(getStoredData(), detailField)
+        };
+    }
+
+    function buildMissingReportCsvBytes(report) {
+        const fields = ['title', 'douban_id', 'douban_url', 'mark_date', 'status', 'detail_fetch_status', 'detail_fetch_error'];
+        const headers = ['标题', '豆瓣条目 ID', '豆瓣链接', '标记日期', '收藏状态', '详情抓取状态', '详情抓取错误'];
+        const lines = [headers.map(csvCell).join(',')];
+        report.rows.forEach(row => lines.push(fields.map(field => csvCell(row[field])).join(',')));
+        return utf8Bytes(`\uFEFF${lines.join('\r\n')}`);
+    }
+
+    function generateMissingDetailReport(category) {
+        const report = getMissingDetailReport(category);
+        if (!report || !report.rows.length) return;
+        const name = `${getExportBaseName(category)}_Missing_${report.label}`;
+        triggerDownload(new Blob([buildMissingReportCsvBytes(report)], { type: 'text/csv;charset=utf-8' }), `${name}.csv`);
+    }
+
     function showDownloadPanel(category) {
         if (document.getElementById('db-export-modal-overlay')) return;
         const data = getStoredData();
         const state = getState();
         const includeCovers = Boolean(state.includeCovers);
+        const missingReport = getMissingDetailReport(category);
+        const isPartial = Boolean(state.stoppedEarly);
         const coverCount = data.filter(item => item.cover_url).length;
-        const coverAction = includeCovers && coverCount > 0 ? `<button class="db-btn db-btn-primary" style="background:#7b61ff" id="db-dl-covers">📦 下载完整资源包 ZIP（封面 + JSON + Excel）</button>` : '';
+        const coverAction = includeCovers && coverCount > 0 ? `<button class="db-btn db-btn-primary" style="background:#7b61ff" id="db-dl-covers">📦 下载完整资源包 ZIP（封面 + JSON + Excel + CSV）</button>` : '';
         const coverNote = !includeCovers
             ? '本次未选择封面资源，不会产生额外图片请求或占用。'
             : coverCount > 0
-                ? `识别到 ${coverCount} 张封面，粗略占用 ${estimateCoverSize(coverCount)}。下面两个按钮是单独的数据文件；完整资源包 ZIP 还会包含封面图片、主数据 JSON、Excel 和 cover-manifest.json。`
+                ? `识别到 ${coverCount} 张封面，粗略占用 ${estimateCoverSize(coverCount)}。下面按钮可单独下载数据文件；完整资源包 ZIP 还会包含封面图片、JSON、Excel、CSV 和 cover-manifest.json。`
                 : '本次选择了封面资源，但页面中没有识别到可下载图片，因此不会产生封面 ZIP；数据文件中的封面路径为空。';
         const overlay = document.createElement('div');
         overlay.id = 'db-export-modal-overlay';
         overlay.innerHTML = `<div id="db-export-modal">
-            <h3>✅ 抓取完成</h3><p style="font-size:16px;text-align:center">共收集到 <b>${data.length}</b> 条${CATEGORIES[category].label}数据（${formatPageRange(state.pageRange)}）</p>
+            <h3>${isPartial ? '⏹️ 已停止导出' : '✅ 抓取完成'}</h3><p style="font-size:16px;text-align:center">${isPartial ? '已保留' : '共收集到'} <b>${data.length}</b> 条${CATEGORIES[category].label}数据（${formatPageRange(state.pageRange)}）</p>
             <p class="db-note">${coverNote}</p>
-            <div class="db-download-section"><div class="db-download-title">单独导出数据文件</div><div class="db-download-actions"><button class="db-btn db-btn-primary" id="db-dl-xlsx">📊 单独导出 Excel (.xlsx)</button><button class="db-btn db-btn-primary" style="background:#2c3e50" id="db-dl-json">🤖 单独导出 JSON</button></div></div>
-            ${includeCovers && coverCount > 0 ? `<div class="db-download-section"><div class="db-download-title">完整资源包</div><div class="db-download-actions">${coverAction}</div><p class="db-note">ZIP 内含 covers/、data/*.json、data/*.xlsx 和 cover-manifest.json。</p></div>` : ''}
+            <div class="db-download-section"><div class="db-download-title">单独导出数据文件</div><div class="db-download-actions"><button class="db-btn db-btn-primary" id="db-dl-json">🤖 单独导出 JSON（权威备份）</button><button class="db-btn db-btn-primary" id="db-dl-xlsx">📊 单独导出 Excel (.xlsx)</button><button class="db-btn db-btn-primary" style="background:#2c3e50" id="db-dl-csv">🧾 单独导出 CSV</button></div></div>
+            ${missingReport && missingReport.rows.length ? `<div class="db-download-section"><div class="db-download-title">未取得 ${missingReport.label} 的条目</div><p class="db-note">共 ${missingReport.rows.length} 条，包含空缺和详情抓取失败的条目，方便日后重试。</p><div class="db-download-actions"><button class="db-btn db-btn-secondary" id="db-dl-missing">下载缺失 ${missingReport.label} 报告 (.csv)</button></div></div>` : ''}
+            ${includeCovers && coverCount > 0 ? `<div class="db-download-section"><div class="db-download-title">完整资源包</div><div class="db-download-actions">${coverAction}</div><p class="db-note">ZIP 内含 covers/、data/*.json、data/*.xlsx、data/*.csv 和 cover-manifest.json。</p></div>` : ''}
             <div class="db-btn-group"><button class="db-btn db-btn-secondary" id="db-close-finish">关闭并清理</button></div><p class="db-note" id="db-cover-status" aria-live="polite"></p>
         </div>`;
         document.body.appendChild(overlay);
         overlay.querySelector('#db-dl-xlsx').onclick = () => generateFile(category, 'xlsx');
         overlay.querySelector('#db-dl-json').onclick = () => generateFile(category, 'json');
+        overlay.querySelector('#db-dl-csv').onclick = () => generateFile(category, 'csv');
+        const missingButton = overlay.querySelector('#db-dl-missing');
+        if (missingButton) missingButton.onclick = () => generateMissingDetailReport(category);
         const coverButton = overlay.querySelector('#db-dl-covers');
         if (coverButton) coverButton.onclick = () => downloadCoversZip(category, overlay.querySelector('#db-cover-status'), coverButton).catch(error => {
             const status = overlay.querySelector('#db-cover-status');
@@ -892,6 +1141,35 @@
             localStorage.removeItem(storageKey(CONFIG.dataKey));
             setState({ status: 'idle' });
             location.reload();
+        };
+    }
+
+    function showCaptchaPanel(category, captchaUrl, autoOpen = false) {
+        if (document.getElementById('db-export-modal-overlay')) return;
+        const state = getState();
+        const verifyUrl = captchaUrl || state.captchaUrl || location.href;
+        const overlay = document.createElement('div');
+        overlay.id = 'db-export-modal-overlay';
+        overlay.innerHTML = `<div id="db-export-modal">
+            <h3>🛡️ 豆瓣要求安全验证</h3>
+            <p class="db-note">详情抓取已暂停，尚未抓到详情的数据不会被猜测或写入。请在验证页完成滑块或图形验证，再回到此页面继续；已完成的详情会使用本地缓存，不会重复请求。</p>
+            <p class="db-note">若浏览器拦截了自动弹窗，请点击“打开验证页”。</p>
+            <div class="db-btn-group"><a class="db-btn db-btn-secondary" id="db-open-captcha" target="_blank" rel="noopener">打开验证页</a><button class="db-btn db-btn-primary" id="db-resume-captcha">我已完成验证，继续导出</button></div>
+        </div>`;
+        document.body.appendChild(overlay);
+        const verifyLink = overlay.querySelector('#db-open-captcha');
+        verifyLink.href = verifyUrl;
+        if (autoOpen) window.open(verifyUrl, '_blank', 'noopener');
+        overlay.querySelector('#db-resume-captcha').onclick = () => {
+            const current = getState();
+            setState({
+                ...current,
+                status: 'running',
+                captchaUrl: '',
+                resumedAt: new Date().toISOString()
+            });
+            overlay.remove();
+            processPage(category, getSelectedFields());
         };
     }
 
@@ -912,37 +1190,66 @@
     function startScraping(category, fields, includeCovers, pageRange) {
         const current = new URL(location.href);
         const target = getPageStartUrl(category, pageRange ? pageRange.startPage : 1);
-        setState({ status: 'running', category, includeCovers: Boolean(includeCovers), pageRange: pageRange || null, startedAt: new Date().toISOString() });
+        const runId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        setState({ status: 'running', runId, category, sourceUrl: current.href, includeCovers: Boolean(includeCovers), pageRange: pageRange || null, detailProgress: null, startedAt: new Date().toISOString() });
         setStoredData([]);
         if (target !== current.href) {
             location.href = target;
             return;
         }
+        renderTaskControls(category);
         processPage(category, fields);
     }
 
     async function processPage(category, fields) {
         const state = getState();
         if (state.status !== 'running') return;
+        const runId = state.runId;
         const delay = Math.floor(Math.random() * (CONFIG.maxDelay - CONFIG.minDelay) + CONFIG.minDelay);
         setTimeout(async () => {
+            const activeState = getState();
+            if (activeState.status !== 'running' || activeState.category !== category || activeState.runId !== runId) return;
             try {
-                const pageData = await scrapeCurrentPage(category, fields);
-                if (!state.includeCovers) pageData.forEach(item => { item.cover_url = ''; });
+                const pageNumber = getCurrentPageNumber(category);
+                const pageData = await scrapeCurrentPage(category, fields, progress => {
+                    const current = getState();
+                    if (current.status !== 'running' || current.runId !== runId) return;
+                    setState({ ...current, detailProgress: { ...progress, pageNumber, pageTotal: getTotalPageCount() } });
+                    renderTaskControls(category);
+                });
+                const finalState = getState();
+                if (finalState.status !== 'running' || finalState.category !== category || finalState.runId !== runId) return;
+                if (!finalState.includeCovers) pageData.forEach(item => { item.cover_url = ''; });
                 const merged = new Map(getStoredData().map(item => [item.link || item.id, item]));
                 pageData.forEach(item => merged.set(item.link || item.id, item));
                 setStoredData([...merged.values()]);
                 const currentPage = getCurrentPageNumber(category);
-                const reachedRangeEnd = state.pageRange && currentPage >= state.pageRange.endPage;
+                const reachedRangeEnd = finalState.pageRange && currentPage >= finalState.pageRange.endPage;
                 const next = reachedRangeEnd ? '' : getNextPage();
                 if (next) location.href = next;
                 else {
-                    setState({ status: 'paused_for_download', category, includeCovers: Boolean(state.includeCovers), pageRange: state.pageRange || null, startedAt: state.startedAt, finishedAt: new Date().toISOString() });
+                    setState({ status: 'paused_for_download', category, runId, sourceUrl: finalState.sourceUrl || '', includeCovers: Boolean(finalState.includeCovers), pageRange: finalState.pageRange || null, detailProgress: finalState.detailProgress || null, startedAt: finalState.startedAt, finishedAt: new Date().toISOString() });
                     showDownloadPanel(category);
                 }
             } catch (error) {
                 console.error('[Douban Export] 页面解析失败:', error);
-                setState({ status: 'error', category, includeCovers: Boolean(state.includeCovers), pageRange: state.pageRange || null, message: String(error) });
+                if (getState().status !== 'running' || getState().runId !== runId) return;
+                if (error.code === 'DOUBAN_CAPTCHA_REQUIRED') {
+                    setState({
+                        status: 'paused_for_captcha',
+                        category,
+                        runId,
+                        sourceUrl: activeState.sourceUrl || '',
+                        includeCovers: Boolean(activeState.includeCovers),
+                        pageRange: activeState.pageRange || null,
+                        startedAt: activeState.startedAt,
+                        captchaUrl: error.captchaUrl || location.href,
+                        captchaDetectedAt: new Date().toISOString()
+                    });
+                    showCaptchaPanel(category, error.captchaUrl, true);
+                    return;
+                }
+                setState({ status: 'error', category, runId, sourceUrl: activeState.sourceUrl || '', includeCovers: Boolean(activeState.includeCovers), pageRange: activeState.pageRange || null, message: String(error) });
                 alert('本页解析失败，请打开控制台查看错误后重试。');
             }
         }, delay);
@@ -959,8 +1266,19 @@
         if (fields.includes('comment')) result.comment = item.comment;
         if (fields.includes('intro')) result.intro = item.intro;
         if (fields.includes('link')) result.douban_url = item.link;
+        if (fields.includes('imdb_id')) result.imdb_id = item.detail?.imdb_id || '';
+        if (fields.includes('isbn')) result.isbn = item.detail?.isbn || '';
         if (includeCovers && item.cover_url) result.cover_file = getCoverAssetPath(item, index);
         return result;
+    }
+
+    function exportItemKey(field) {
+        return {
+            id: 'douban_id',
+            rating: 'user_rating',
+            date: 'mark_date',
+            link: 'douban_url'
+        }[field] || field;
     }
 
     function getExportBaseName(category) {
@@ -970,19 +1288,25 @@
 
     function buildJsonOutput(category) {
         const data = getStoredData();
-        const fields = getSelectedFields();
+        const fields = getSelectedFields(category);
         const state = getState();
         const includeCovers = Boolean(state.includeCovers);
         return {
             meta: {
+                schema_name: 'douban-custom-export',
+                schema_version: 1,
+                export_template: 'custom',
                 category,
                 category_name: `${CATEGORIES[category].label}（${getCategoryStatusLabel(category)}）`,
                 export_date: new Date().toISOString(),
                 total_count: data.length,
                 page_range: state.pageRange || null,
                 page_range_label: formatPageRange(state.pageRange),
-                source: 'Douban Media Export Tool',
-                cover_note: includeCovers ? 'cover_file 指向完整资源包 ZIP 中 covers/ 下的本地文件；不保存豆瓣图片原始地址' : '本次未导出封面资源'
+                source: 'Douban Marginalia (adapted from byJming/douban-movie-exporter)',
+                source_url: state.sourceUrl || location.href,
+                rating_scale: 5,
+                detail_fields: fields.filter(field => getAvailableFields(category).find(item => item.key === field)?.requiresDetail),
+                cover_note: includeCovers ? 'cover_file 指向完整资源包 ZIP 中 covers/ 下的本地文件' : '本次未下载封面文件'
             },
             items: data.map((item, index) => selectedExportItem(item, fields, index, includeCovers))
         };
@@ -991,25 +1315,48 @@
     function buildWorkbook(category) {
         if (typeof XLSX === 'undefined') throw new Error('Excel 组件加载失败，请刷新页面后重试。');
         const data = getStoredData();
-        const fields = getSelectedFields();
-        const includeCovers = Boolean(getState().includeCovers);
+        const fields = getSelectedFields(category);
+        const state = getState();
+        const includeCovers = Boolean(state.includeCovers);
         const headers = {
             title: '标题', id: '豆瓣条目 ID', rating: '个人评分', date: '标记日期', status: '收藏状态', tags: '标签',
-            comment: '短评/备注', intro: '简介/出版信息', cover_file: '封面文件', link: '豆瓣链接'
+            comment: '短评/备注（已清洗）', intro: '简介/出版信息', cover_file: '封面文件', link: '豆瓣链接',
+            imdb_id: 'IMDb', isbn: 'ISBN',
+            category: '分类', douban_id: '豆瓣条目 ID', user_rating: '个人评分', rating_scale: '评分满分',
+            mark_date: '标记日期', douban_url: '豆瓣链接', cover_url: '封面原始地址',
+            detail_fetch_status: '详情抓取状态', detail_fetch_error: '详情抓取错误', detail_fetched_at: '详情抓取时间'
         };
         const exportFields = includeCovers ? [...fields, 'cover_file'] : fields;
-        const sheet = [exportFields.map(field => headers[field])];
-        data.forEach((item, index) => sheet.push(exportFields.map(field => {
-            if (field === 'rating') return item.rating === '' ? '' : item.rating;
-            if (field === 'tags') return item.tags || '';
-            if (field === 'cover_file') return getCoverAssetPath(item, index);
-            return item[field] || '';
-        })));
+        const sheet = [exportFields.map(field => headers[field] || field)];
+        data.forEach((item, index) => {
+            const exportItem = selectedExportItem(item, fields, index, includeCovers);
+            sheet.push(exportFields.map(field => {
+                const value = exportItem[exportItemKey(field)];
+                return Array.isArray(value) ? value.join(' / ') : (value ?? '');
+            }));
+        });
         const ws = XLSX.utils.aoa_to_sheet(sheet);
-        ws['!cols'] = exportFields.map(field => ({ wch: field === 'title' ? 42 : field === 'comment' || field === 'intro' ? 52 : field === 'link' ? 64 : field === 'cover_file' ? 36 : 16 }));
+        ws['!cols'] = exportFields.map(field => ({ wch: field === 'title' ? 42 : field === 'comment' || field === 'comment_raw' || field === 'intro' ? 52 : field === 'link' ? 64 : field === 'cover_file' ? 36 : 16 }));
         const wb = XLSX.utils.book_new();
         XLSX.utils.book_append_sheet(wb, ws, `${CATEGORIES[category].sheet}（${getCategoryStatusLabel(category)}）`);
         return wb;
+    }
+
+    function csvCell(value) {
+        if (value === null || value === undefined) return '';
+        const text = String(value);
+        return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+    }
+
+    function buildCsvBytes(category) {
+        const items = buildJsonOutput(category).items.map(item => ({
+            ...item,
+            tags: Array.isArray(item.tags) ? item.tags.join(' / ') : item.tags
+        }));
+        const fields = [...new Set(items.flatMap(item => Object.keys(item)))];
+        const lines = [fields.map(csvCell).join(',')];
+        items.forEach(item => lines.push(fields.map(field => csvCell(item[field])).join(',')));
+        return utf8Bytes(`\uFEFF${lines.join('\r\n')}`);
     }
 
     function buildXlsxBytes(category) {
@@ -1021,9 +1368,11 @@
         const baseName = getExportBaseName(category);
         const jsonBytes = utf8Bytes(JSON.stringify(buildJsonOutput(category), null, 2));
         const xlsxBytes = buildXlsxBytes(category);
+        const csvBytes = buildCsvBytes(category);
         return [
             { path: `data/${baseName}.json`, bytes: jsonBytes, crc: crc32(jsonBytes) },
-            { path: `data/${baseName}.xlsx`, bytes: xlsxBytes, crc: crc32(xlsxBytes) }
+            { path: `data/${baseName}.xlsx`, bytes: xlsxBytes, crc: crc32(xlsxBytes) },
+            { path: `data/${baseName}.csv`, bytes: csvBytes, crc: crc32(csvBytes) }
         ];
     }
 
@@ -1035,6 +1384,10 @@
             if (format === 'json') {
                 const bytes = utf8Bytes(JSON.stringify(buildJsonOutput(category), null, 2));
                 triggerDownload(new Blob([bytes], { type: 'application/json;charset=utf-8' }), `${name}.json`);
+                return;
+            }
+            if (format === 'csv') {
+                triggerDownload(new Blob([buildCsvBytes(category)], { type: 'text/csv;charset=utf-8' }), `${name}.csv`);
                 return;
             }
             const bytes = buildXlsxBytes(category);
@@ -1067,7 +1420,10 @@
         const state = getState();
         if (state.status === 'paused_for_download' && state.category === context) {
             showDownloadPanel(context);
+        } else if (state.status === 'paused_for_captcha' && state.category === context) {
+            showCaptchaPanel(context, state.captchaUrl);
         } else if (state.status === 'running' && state.category === context) {
+            renderTaskControls(context);
             setTimeout(() => processPage(context, getSelectedFields()), 800);
         } else if (context !== 'generic' && new URL(location.href).searchParams.get('db_export') === '1') {
             setTimeout(showConfigPanel, 500);

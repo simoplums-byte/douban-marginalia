@@ -1,8 +1,10 @@
 # 项目背景：Douban Marginalia
 
-Document updated at: 2026-09-08 (working tree)  
-Last verified against: `e35d855`（上游 `2.4.0` 提交）及当前未提交的 Douban Marginalia 改造  
-Working tree state: 本地改造尚未提交、尚未发布
+Document updated at: 2026-09-09
+
+Last verified against: `370a0b1`（Douban Marginalia 首次入库提交）
+
+Working tree state: 已提交并推送至 GitHub 私有仓库 `simoplums-byte/douban-marginalia`（`main`）
 
 ## 定位
 
@@ -17,7 +19,6 @@ Douban Marginalia 是一个 Tampermonkey 兼容的豆瓣收藏导出脚本，基
 | 用户脚本 | `douban-marginalia.user.js` | 唯一运行入口；包含页面解析、分页、详情获取、导出与界面。 |
 | 单元测试 | `tests/douban-marginalia.test.js` | 以 Node `vm` 装载脚本，覆盖字段映射、清洗与验证检测等纯逻辑。 |
 | 用户说明 | `README.md` | 当前功能、安装和使用方式的权威来源。 |
-| 历史资料 | `archive/2026-09-pre-marginalia/` | 改造前界面截图；只读且不代表当前行为。 |
 | 用户数据 | `douban-data/` | 本地导出结果与验证样例；非源码，不得擅自清理。 |
 
 ## 数据与运行方式
@@ -43,6 +44,5 @@ git diff --check
 - `README.md`：使用者说明和当前产品行为。
 - `AGENTS.md`：长期协作、验证与授权边界。
 - 本文件：稳定背景、结构、数据边界和验证状态。
-- `archive/2026-09-pre-marginalia/README.md`：历史截图的用途与限制。
 
 未建立 PRD、ADR、`.ai-sync/` 或 `CHANGELOG.md`：当前功能边界由 README 足以表达，暂无并行任务或公开发布记录。首次公开发布前再创建更新日志，并同步公开元数据。

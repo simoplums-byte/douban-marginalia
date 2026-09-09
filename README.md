@@ -4,7 +4,7 @@
 
 > 按需导出豆瓣电影、读书、音乐和游戏收藏：自定义字段、JSON / Excel / CSV，可选 IMDb / ISBN 与封面资源包。
 
-基于 [byJming/douban-movie-exporter](https://github.com/byJming/douban-movie-exporter) 的本地改造项目。原项目由 ming 创建并以 MIT 许可证发布；Douban Marginalia 由 **Shawn 与 Codex 共创**，在其基础上调整为面向长期留存与后续迁移的数据导出工具，并保留原作者署名与许可证。
+基于 [byJming/douban-movie-exporter](https://github.com/byJming/douban-movie-exporter) 的改造项目。原项目由 ming 创建并以 MIT 许可证发布；Douban Marginalia 由 **Shawn 与 Codex 共创**，在其基础上调整为面向长期留存与后续迁移的数据导出工具，并保留原作者署名与许可证。
 
 它用于备份豆瓣电影、读书、音乐和游戏收藏，支持自定义字段、按需详情抓取、JSON、Excel、CSV，以及可选的封面资源包。
 
@@ -27,7 +27,7 @@
    - 或复制脚本内容，在 Tampermonkey 中新建脚本并粘贴保存。
 3. 确认安装或更新后，脚本版本为 `1.0.4`。
 
-> 本仓库是 Douban Marginalia 的发布仓库；原项目地址 [byJming/douban-movie-exporter](https://github.com/byJming/douban-movie-exporter) 保留为上游来源，两者是不同脚本。
+> 本仓库为 Douban Marginalia 的源码仓库；上游原项目见 [byJming/douban-movie-exporter](https://github.com/byJming/douban-movie-exporter)，两者为不同脚本。
 
 ## 使用
 
@@ -101,7 +101,6 @@ README.md                   本说明，使用者文档的权威来源
 AGENTS.md                   项目协作规则（面向协作者与 AI）
 docs/PROJECT-CONTEXT.md     稳定背景、数据边界与文档地图
 tests/                      单元测试（以 Node vm 装载脚本）
-archive/                    改造前历史截图，仅供追溯，不代表当前行为
 ```
 
 ## 开发与验证
@@ -122,10 +121,6 @@ git diff --check
 - 抓取期间不要手动修改收藏状态、排序方式或分页参数。
 - 豆瓣页面结构可能调整；如果按钮消失或字段为空，请附页面类型和控制台错误反馈。
 - 发布封面或条目内容到个人网站前，请确认用途合规。
-
-## 历史资料
-
-旧版界面截图已移至 [`archive/2026-09-pre-marginalia/`](./archive/2026-09-pre-marginalia/)，仅供追溯改造来源，不代表当前功能或界面。
 
 ## License
 

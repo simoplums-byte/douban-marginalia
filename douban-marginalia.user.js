@@ -2,11 +2,11 @@
 // @name         Douban Marginalia
 // @name:en      Douban Marginalia
 // @name:zh-CN   Douban Marginalia
-// @namespace    https://local.codex/douban-marginalia
+// @namespace    https://github.com/simoplums-byte/douban-marginalia
 // @version      1.0.4
 // @description  按需导出豆瓣电影、读书、音乐和游戏收藏，支持 JSON/Excel/CSV、IMDb、ISBN 和封面资源 ZIP。
 // @description:en Export selected Douban movie, book, music and game fields to JSON/Excel/CSV, with optional IMDb, ISBN and cover assets.
-// @author       ming (original project); Sean Li (local modifications)
+// @author       ming (original project); Shawn Li
 // @match        https://*.douban.com/*
 // @match        https://douban.com/*
 // @match        https://www.douban.com/people/*
@@ -38,8 +38,8 @@
 // @connect      img8.doubanio.com
 // @connect      img9.doubanio.com
 // @license      MIT
-// @homepageURL  https://github.com/byJming/douban-movie-exporter
-// @source       https://github.com/byJming/douban-movie-exporter
+// @homepageURL  https://github.com/simoplums-byte/douban-marginalia
+// @source       https://github.com/simoplums-byte/douban-marginalia
 // ==/UserScript==
 
 (function () {
